@@ -899,7 +899,7 @@ def display_summary_metrics(df):
     
     st.markdown('</div>', unsafe_allow_html=True)
 
-def display_individual_customer(customer_data, selected_customer):
+def display_individual_customer(customer_data, selected_customer, df_raw=None):
     """Display individual customer analysis with enhanced highlighting"""
     
     segment_class = get_segment_color_class(customer_data['Customer_Segment'])
@@ -941,7 +941,7 @@ def display_individual_customer(customer_data, selected_customer):
         if has_limited_data:
             st.markdown(f"""
             <div class="warning-highlight" style="margin-bottom: 1rem;">
-                ⚠️ Can't detect, client has not enough data or history
+                ⚠️ <strong>Limited Data:</strong> This customer has only {total_projects} project(s) over {time_span:.1f} month(s). Some metrics may be less reliable.
             </div>
             """, unsafe_allow_html=True)
         
@@ -1025,7 +1025,7 @@ def display_individual_customer(customer_data, selected_customer):
         </div>
         """, unsafe_allow_html=True)
 
-        # --- New charts: Revenue breakdown by service (pie) and avg revenue ---
+        # --- New charts: Revenue breakdown by service (pie), avg revenue, and service frequency ---
         try:
             svc_break = customer_data.get('Service_Revenue_Breakdown', {})
             proj_div = customer_data.get('Project_Diversity_Breakdown', {})
@@ -1045,46 +1045,212 @@ def display_individual_customer(customer_data, selected_customer):
                 fig_rev.update_layout(title_font_size=18, font=dict(size=14))
                 st.plotly_chart(fig_rev, use_container_width=True)
 
-            # Average revenue per project by service (absolute E£)
+            # Average revenue per project by service (absolute E£) as a pie chart
             avg_rev = customer_data.get('Service_Avg_Revenue_Per_Project', {})
             if isinstance(avg_rev, dict) and len(avg_rev) > 0:
                 labels = list(avg_rev.keys())
                 values = [v for v in avg_rev.values()]
-                fig_avg_rev = px.bar(
-                    x=labels,
-                    y=values,
+                fig_avg_rev = px.pie(
+                    names=labels,
+                    values=values,
                     title="💵 Avg Revenue per Project by Service (E£)",
-                    color=labels,
                     color_discrete_sequence=['#667eea', '#43e97b', '#fa709a', '#ffbe0b', '#8338ec', '#3a86ff']
                 )
-                fig_avg_rev.update_layout(yaxis_title='E£', title_font_size=18, font=dict(size=14))
+                fig_avg_rev.update_traces(textinfo='label+value', textfont_size=14)
+                fig_avg_rev.update_layout(title_font_size=18, font=dict(size=14))
                 st.plotly_chart(fig_avg_rev, use_container_width=True)
-            
-            # Show a small table combining Total and Avg per service
+            # Service frequency per user by service (pie based on project inclusion)
+            if isinstance(proj_div, dict) and len(proj_div) > 0:
+                labels = list(proj_div.keys())
+                values = [v for v in proj_div.values()]  # use raw fractions; pie shows %
+                fig_freq = px.pie(
+                    names=labels,
+                    values=values,
+                    title="📊 Service Frequency per User (%)",
+                    color_discrete_sequence=['#4facfe', '#43e97b', '#fa709a', '#ffbe0b', '#8338ec', '#3a86ff']
+                )
+                fig_freq.update_traces(textinfo='label+percent', textfont_size=14)
+                fig_freq.update_layout(title_font_size=18, font=dict(size=14))
+                st.plotly_chart(fig_freq, use_container_width=True)
+
+            # Show a small table combining Total, Avg, and Frequency per service
             try:
                 totals = customer_data.get('Service_Total_Revenue', {})
                 avgs = customer_data.get('Service_Avg_Revenue_Per_Project', {})
+                freqs = customer_data.get('Project_Diversity_Breakdown', {})
                 # build rows for all services present in either dict
-                all_services = sorted(set(list(totals.keys()) + list(avgs.keys())))
+                all_services = sorted(set(list(totals.keys()) + list(avgs.keys()) + list(freqs.keys())))
                 if all_services:
                     table_rows = []
                     for s in all_services:
                         table_rows.append({
                             'Service': s,
                             'Total_E£': totals.get(s, 0.0),
-                            'Avg_E£_per_Project': avgs.get(s, 0.0)
+                            'Avg_E£_per_Project': avgs.get(s, 0.0),
+                            'Frequency_%': freqs.get(s, 0.0) * 100
                         })
                     import pandas as _pd
                     svc_table = _pd.DataFrame(table_rows)
                     svc_table = svc_table.sort_values('Total_E£', ascending=False)
                     svc_table['Total_E£'] = svc_table['Total_E£'].map(lambda x: f"E£{x:,.2f}")
                     svc_table['Avg_E£_per_Project'] = svc_table['Avg_E£_per_Project'].map(lambda x: f"E£{x:,.2f}")
+                    svc_table['Frequency_%'] = svc_table['Frequency_%'].map(lambda x: f"{x:.1f}%")
                     st.markdown("**🔎 Service Spend Summary**")
                     st.table(svc_table)
             except Exception as e:
                 st.write(f"Error building service totals table: {e}")
         except Exception as e:
             st.write(f"Error creating service/project charts: {e}")
+    
+    # Project Explorer Section
+    if df_raw is not None:
+        st.markdown("---")
+        st.markdown("""
+        <div class="stats-container">
+            <h3>📋 Project Explorer</h3>
+            <p>Select a project to view its services and quotation details</p>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        try:
+            # Filter raw data for this customer
+            customer_projects = df_raw[df_raw['ClientID'] == selected_customer].copy()
+            
+            if len(customer_projects) > 0:
+                # Extract Quote_ID if available
+                if 'Number' in customer_projects.columns:
+                    customer_projects['Quote_ID'] = customer_projects['Number'].astype(str).str.rsplit('.', n=1).str[0]
+                    customer_projects['Version_Number'] = customer_projects['Number'].astype(str).str.rsplit('.', n=1).str[1]
+                else:
+                    customer_projects['Quote_ID'] = customer_projects.index.astype(str)
+                    customer_projects['Version_Number'] = '1'
+                
+                # Get unique project names
+                if 'Name' in customer_projects.columns:
+                    # Create a mapping of project names to their Quote_IDs
+                    project_mapping = customer_projects.groupby('Name')['Quote_ID'].first().to_dict()
+                    unique_project_names = sorted(project_mapping.keys())
+                    
+                    # Project selector by name
+                    project_options = ["-- Select Project --"] + unique_project_names
+                    selected_project_name = st.selectbox(
+                        "Choose a project:",
+                        options=project_options,
+                        key=f"project_selector_{selected_customer}"
+                    )
+                    
+                    if selected_project_name and selected_project_name != "-- Select Project --":
+                        # Get all data for this project name (could be multiple Quote_IDs with same name)
+                        project_data = customer_projects[customer_projects['Name'] == selected_project_name].copy()
+                        
+                        # Count quotations (versions)
+                        num_quotations = len(project_data)
+                        
+                        # Get project ID
+                        project_id = project_data['Quote_ID'].iloc[0] if 'Quote_ID' in project_data.columns else "N/A"
+                        
+                        # Get status
+                        statuses = project_data['Estimate status'].unique() if 'Estimate status' in project_data.columns else ['Unknown']
+                        final_status = 'Closed' if 'Closed' in statuses else statuses[0] if len(statuses) > 0 else 'Unknown'
+                        
+                        # Display project header
+                        col1, col2, col3 = st.columns(3)
+                        
+                        with col1:
+                            st.markdown(f"""
+                            <div class="stats-container">
+                                <h4>📝 Project Name</h4>
+                                <h3 style="color: #4facfe;">{selected_project_name}</h3>
+                            </div>
+                            """, unsafe_allow_html=True)
+                        
+                        with col2:
+                            st.markdown(f"""
+                            <div class="stats-container">
+                                <h4>📊 Quotations Sent</h4>
+                                <h3 style="color: #43e97b;">{num_quotations}</h3>
+                            </div>
+                            """, unsafe_allow_html=True)
+                        
+                        with col3:
+                            status_color = '#43e97b' if final_status == 'Closed' else '#fa709a'
+                            st.markdown(f"""
+                            <div class="stats-container">
+                                <h4>✅ Status</h4>
+                                <h3 style="color: {status_color};">{final_status}</h3>
+                            </div>
+                            """, unsafe_allow_html=True)
+                        
+                        # Project ID
+                        st.markdown(f"""
+                        <div class="stats-container">
+                            <h4>📁 Project ID</h4>
+                            <p style="font-size: 16px; color: #667eea; font-weight: bold;">{project_id}</p>
+                        </div>
+                        """, unsafe_allow_html=True)
+                        
+                        # Identify service columns (assuming they're the ones with numeric values, excluding standard columns)
+                        exclude_cols = ['Date', 'Number', 'Estimate status', 'Taxable amount', 'ClientID', 
+                                       'converted to invoice (AMOUNT)', 'Name', 'Quote_ID', 'Version_Number']
+                        
+                        service_cols = [col for col in project_data.columns 
+                                       if col not in exclude_cols and pd.api.types.is_numeric_dtype(project_data[col])]
+                        
+                        if service_cols:
+                            st.markdown("""
+                            <div class="stats-container">
+                                <h4>🛠️ Services in this Project</h4>
+                            </div>
+                            """, unsafe_allow_html=True)
+                        
+                        # Aggregate services across all versions to see which services were included
+                        service_summary = []
+                        for svc in service_cols:
+                            total_value = project_data[svc].sum()
+                            if total_value > 0:  # Only show services that were actually used
+                                service_summary.append({
+                                    'Service': svc,
+                                    'Total_Value': total_value
+                                })
+                        
+                        if service_summary:
+                            service_df = pd.DataFrame(service_summary)
+                            service_df = service_df.sort_values('Total_Value', ascending=False)
+                            
+                            # Display as cards
+                            cols = st.columns(min(3, len(service_summary)))
+                            for i, (idx, row) in enumerate(service_df.iterrows()):
+                                with cols[i % 3]:
+                                    st.markdown(f"""
+                                    <div class="stats-container" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white;">
+                                        <h4>{row['Service']}</h4>
+                                        <p><strong>Total:</strong> E£{row['Total_Value']:,.2f}</p>
+                                    </div>
+                                    """, unsafe_allow_html=True)
+                            
+                            # Show detailed version history
+                            st.markdown("---")
+                            st.markdown("**📜 Quotation Version History**")
+                            
+                            # Prepare version data
+                            version_display = project_data[['Version_Number', 'Date', 'Estimate status', 'Taxable amount'] + service_cols].copy()
+                            if 'Date' in version_display.columns:
+                                version_display['Date'] = pd.to_datetime(version_display['Date'], errors='coerce').dt.strftime('%Y-%m-%d')
+                            
+                            # Format currency columns
+                            for col in ['Taxable amount'] + service_cols:
+                                if col in version_display.columns:
+                                    version_display[col] = version_display[col].apply(lambda x: f"E£{x:,.2f}" if pd.notna(x) and x > 0 else "-")
+                            
+                            st.dataframe(version_display, use_container_width=True)
+                        else:
+                            st.info("No services found with values > 0 for this project.")
+                else:
+                    st.info("No 'Name' column found in data. Cannot search by project name.")
+            else:
+                st.warning("No project data found for this customer.")
+        except Exception as e:
+            st.error(f"Error loading project data: {e}")
 
 def main():
     # Enhanced Header with animation
@@ -1169,593 +1335,318 @@ def main():
             </div>
             """, unsafe_allow_html=True)
             
+            # Show processed data preview
+            with st.expander("👀 Preview Processed Data"):
+                st.dataframe(processed_data.head(10), use_container_width=True)
+                st.write(f"**Shape:** {processed_data.shape[0]} rows × {processed_data.shape[1]} columns")
+            
+            # Quick Search Options (placed BEFORE KPIs)
+            st.header("🔎 Find a Customer")
+            st.markdown("""
+            <div class="stats-container">
+                <p>Choose how you'd like to look up a customer: by company or directly by client name.</p>
+            </div>
+            """, unsafe_allow_html=True)
+
+            # Prepare lightweight company data for quick search
+            with st.spinner("⚙️ Preparing quick search options..."):
+                top_company_data = process_company_data(df_raw)
+
+            search_mode = st.radio(
+                "Lookup mode:",
+                options=["Search by Company", "Search by Client"],
+                horizontal=True,
+            )
+
+            selected_customer_quick = None
+            if search_mode == "Search by Client":
+                # Always show all clients (as requested), but don't select by default
+                candidates = sorted(processed_data['ClientID'].dropna().unique().tolist())
+                select_options = ["-- Select Customer --"] + candidates
+                sel_val = st.selectbox("Select customer:", options=select_options, index=0, key="quick_client_select")
+                selected_customer_quick = None if sel_val == "-- Select Customer --" else sel_val
+
+            else:  # Search by Company: Country -> Company -> Customer
+                if top_company_data is not None and not top_company_data.empty:
+                    available_countries = sorted(top_company_data['Country'].dropna().unique().tolist())
+                    sel_country = st.selectbox(
+                        "Choose a Country:", options=["-- Select Country --"] + available_countries, key="quick_country_select"
+                    )
+                    if sel_country and sel_country != "-- Select Country --":
+                        sub_country = top_company_data[top_company_data['Country'] == sel_country]
+                        available_companies = sorted(sub_country['Company'].dropna().unique().tolist())
+                        sel_company = st.selectbox(
+                            "Choose a Company:", options=["-- Select Company --"] + available_companies, key="quick_company_select"
+                        )
+                        if sel_company and sel_company != "-- Select Company --":
+                            # Get the row for this country+company
+                            row = sub_country[sub_country['Company'] == sel_company]
+                            all_clients = []
+                            for lst in row['ClientIDs'].values:
+                                all_clients.extend(lst)
+                            all_clients = sorted(set(all_clients))
+                            if all_clients:
+                                company_select_options = ["-- Select Customer --"] + all_clients
+                                sel_cust = st.selectbox(
+                                    "Choose a Customer:", options=company_select_options, index=0, key="quick_company_client_select"
+                                )
+                                selected_customer_quick = None if sel_cust == "-- Select Customer --" else sel_cust
+                            else:
+                                st.warning("No customers found for the selected company.")
+                else:
+                    st.warning("Company data is not available for quick search.")
+
+            # If a customer is selected via quick lookup, show their analytics immediately
+            if selected_customer_quick:
+                st.markdown("---")
+                st.subheader(f"📊 Quick View: {selected_customer_quick}")
+                if selected_customer_quick in processed_data['ClientID'].values:
+                    cust_row = processed_data[processed_data['ClientID'] == selected_customer_quick].iloc[0]
+                    display_individual_customer(cust_row, selected_customer_quick, df_raw)
+                else:
+                    st.warning("Selected customer not found in processed data.")
+            
+            # Exports available within Find a Customer
+            st.markdown("---")
+            st.markdown("### 📥 Export Your Analytics")
+            
+            export_col1, export_col2 = st.columns(2)
+            with export_col1:
+                # Download all analytics
+                full_csv_buffer_fc = io.StringIO()
+                processed_data.to_csv(full_csv_buffer_fc, index=False)
+                full_csv_data_fc = full_csv_buffer_fc.getvalue()
+                st.download_button(
+                    label="📋 Download All Analytics (CSV)",
+                    data=full_csv_data_fc,
+                    file_name=f"complete_customer_analytics_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                    mime="text/csv",
+                    key="download_all_from_find"
+                )
+            with export_col2:
+                # Download selected customer's analytics when available
+                if selected_customer_quick:
+                    single_row = processed_data[processed_data['ClientID'] == selected_customer_quick]
+                    single_csv_buffer = io.StringIO()
+                    single_row.to_csv(single_csv_buffer, index=False)
+                    single_csv_data = single_csv_buffer.getvalue()
+                    st.download_button(
+                        label=f"👤 Download {selected_customer_quick} (CSV)",
+                        data=single_csv_data,
+                        file_name=f"{selected_customer_quick}_analytics_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                        mime="text/csv",
+                        key="download_single_from_find"
+                    )
+                else:
+                    st.info("Select a customer above to enable single-customer export.")
+            
             # Display summary metrics
             st.header("📈 Key Performance Indicators")
             display_summary_metrics(processed_data)
-            
-            # Company Analysis Section with Hierarchical Navigation
-            st.header("🏢 Hierarchical Customer Navigator")
-            st.markdown("""
-            <div class="stats-container">
-                <h4>🎯 Navigate: Country → Company → Customer → Analytics</h4>
-                <p>Select a country, then a company, then a customer to view detailed analytics</p>
-            </div>
-            """, unsafe_allow_html=True)
-            
-            # Process company data
-            with st.spinner("🎨 Processing company analytics..."):
-                company_data = process_company_data(df_raw)
-            
-            if not company_data.empty:
-                # Create three columns for hierarchical navigation
-                nav_col1, nav_col2, nav_col3 = st.columns(3)
-                
-                with nav_col1:
-                    st.markdown("""
-                    <div class="stats-container">
-                        <h4>🌍 Step 1: Select Country</h4>
-                    </div>
-                    """, unsafe_allow_html=True)
-                    
-                    # Get unique countries sorted
-                    available_countries = sorted(company_data['Country'].unique())
-                    selected_country = st.selectbox(
-                        "Choose a Country:",
-                        options=['-- Select Country --'] + available_countries,
-                        key='country_selector'
-                    )
-                    
-                    if selected_country != '-- Select Country --':
-                        country_companies = company_data[company_data['Country'] == selected_country]
-                        st.markdown(f"""
-                        <div class="success-highlight">
-                            � {len(country_companies)} companies in {selected_country}
-                        </div>
-                        """, unsafe_allow_html=True)
-                
-                with nav_col2:
-                    st.markdown("""
-                    <div class="stats-container">
-                        <h4>🏢 Step 2: Select Company</h4>
-                    </div>
-                    """, unsafe_allow_html=True)
-                    
-                    if selected_country != '-- Select Country --':
-                        country_companies = company_data[company_data['Country'] == selected_country]
-                        available_companies = sorted(country_companies['Company'].unique())
-                        
-                        selected_company = st.selectbox(
-                            "Choose a Company:",
-                            options=['-- Select Company --'] + available_companies,
-                            key='company_selector'
-                        )
-                        
-                        if selected_company != '-- Select Company --':
-                            company_info = country_companies[country_companies['Company'] == selected_company].iloc[0]
-                            st.markdown(f"""
-                            <div class="success-highlight">
-                                👥 {company_info['Total_Clients']} customers
-                            </div>
-                            """, unsafe_allow_html=True)
-                    else:
-                        st.info("👈 Select a country first")
-                        selected_company = '-- Select Company --'
-                
-                with nav_col3:
-                    st.markdown("""
-                    <div class="stats-container">
-                        <h4>👤 Step 3: Select Customer</h4>
-                    </div>
-                    """, unsafe_allow_html=True)
-                    
-                    if selected_country != '-- Select Country --' and selected_company != '-- Select Company --':
-                        company_info = company_data[
-                            (company_data['Country'] == selected_country) & 
-                            (company_data['Company'] == selected_company)
-                        ].iloc[0]
-                        
-                        available_customers = company_info['ClientIDs']
-                        
-                        selected_customer_nav = st.selectbox(
-                            "Choose a Customer:",
-                            options=['-- Select Customer --'] + available_customers,
-                            key='customer_selector'
-                        )
-                        
-                        if selected_customer_nav != '-- Select Customer --':
-                            st.markdown(f"""
-                            <div class="success-highlight">
-                                ✅ Ready to view analytics
-                            </div>
-                            """, unsafe_allow_html=True)
-                    else:
-                        st.info("👈 Select a company first")
-                        selected_customer_nav = '-- Select Customer --'
-                
-                # Display selected customer analytics
-                if selected_country != '-- Select Country --' and selected_company != '-- Select Company --' and selected_customer_nav != '-- Select Customer --':
-                    st.markdown("---")
-                    st.header(f"📊 Analytics for: {selected_customer_nav}")
-                    
-                    # Get customer data from processed_data
-                    if selected_customer_nav in processed_data['ClientID'].values:
-                        customer_data_row = processed_data[processed_data['ClientID'] == selected_customer_nav].iloc[0]
-                        display_individual_customer(customer_data_row, selected_customer_nav)
-                        
-                        # Additional context about company
-                        st.markdown("---")
-                        st.subheader("🏢 Company Context")
-                        
-                        col1, col2, col3, col4 = st.columns(4)
-                        
-                        with col1:
-                            st.markdown(f"""
-                            <div class="stats-container">
-                                <h4>🌍 Country</h4>
-                                <h3 style="color: #4facfe;">{selected_country}</h3>
-                            </div>
-                            """, unsafe_allow_html=True)
-                        
-                        with col2:
-                            st.markdown(f"""
-                            <div class="stats-container">
-                                <h4>🏢 Company</h4>
-                                <h3 style="color: #43e97b;">{selected_company}</h3>
-                            </div>
-                            """, unsafe_allow_html=True)
-                        
-                        with col3:
-                            company_info = company_data[
-                                (company_data['Country'] == selected_country) & 
-                                (company_data['Company'] == selected_company)
-                            ].iloc[0]
-                            st.markdown(f"""
-                            <div class="stats-container">
-                                <h4>💰 Company Revenue</h4>
-                                <h3 style="color: #f093fb;">E£{company_info['Total_Revenue']:,.0f}</h3>
-                            </div>
-                            """, unsafe_allow_html=True)
-                        
-                        with col4:
-                            st.markdown(f"""
-                            <div class="stats-container">
-                                <h4>🎯 Company Win Rate</h4>
-                                <h3 style="color: #764ba2;">{company_info['Win_Rate_%']:.1f}%</h3>
-                            </div>
-                            """, unsafe_allow_html=True)
-                        
-                        # Show other customers in same company
-                        st.markdown("---")
-                        st.subheader(f"👥 Other Customers in {selected_company}")
-                        
-                        other_customers = [c for c in available_customers if c != selected_customer_nav]
-                        if other_customers:
-                            cols = st.columns(min(3, len(other_customers)))
-                            for idx, other_customer in enumerate(other_customers[:6]):  # Show max 6
-                                with cols[idx % 3]:
-                                    if other_customer in processed_data['ClientID'].values:
-                                        other_cust_data = processed_data[processed_data['ClientID'] == other_customer].iloc[0]
-                                        segment_class = get_segment_color_class(other_cust_data['Customer_Segment'])
-                                        
-                                        st.markdown(f"""
-                                        <div class="{segment_class}" style="padding: 1rem; margin: 0.5rem 0;">
-                                            <h5>{other_customer}</h5>
-                                            <p><strong>CLV:</strong> E£{other_cust_data['CLV']:,.0f}</p>
-                                            <p><strong>Win Rate:</strong> {other_cust_data['Win_Rate_%']:.1f}%</p>
-                                        </div>
-                                        """, unsafe_allow_html=True)
-                        else:
-                            st.info("This is the only customer for this company.")
-                    else:
-                        st.warning(f"Customer data not found for {selected_customer_nav}")
-                
-                # Show company overview when country/company selected but not customer
-                elif selected_country != '-- Select Country --' and selected_company != '-- Select Company --':
-                    st.markdown("---")
-                    st.header(f"🏢 {selected_company} Overview in {selected_country}")
-                    
-                    company_info = company_data[
-                        (company_data['Country'] == selected_country) & 
-                        (company_data['Company'] == selected_company)
-                    ].iloc[0]
-                    
-                    # Company metrics
-                    col1, col2, col3, col4 = st.columns(4)
-                    
-                    with col1:
-                        st.markdown(f"""
-                        <div class="stats-container">
-                            <h4>👥 Total Customers</h4>
-                            <h2 style="color: #4facfe;">{company_info['Total_Clients']}</h2>
-                        </div>
-                        """, unsafe_allow_html=True)
-                    
-                    with col2:
-                        st.markdown(f"""
-                        <div class="stats-container">
-                            <h4>📋 Total Quotes</h4>
-                            <h2 style="color: #43e97b;">{company_info['Total_Quotes']}</h2>
-                        </div>
-                        """, unsafe_allow_html=True)
-                    
-                    with col3:
-                        st.markdown(f"""
-                        <div class="stats-container">
-                            <h4>💰 Total Revenue</h4>
-                            <h2 style="color: #f093fb;">E£{company_info['Total_Revenue']:,.0f}</h2>
-                        </div>
-                        """, unsafe_allow_html=True)
-                    
-                    with col4:
-                        st.markdown(f"""
-                        <div class="stats-container">
-                            <h4>🎯 Win Rate</h4>
-                            <h2 style="color: #764ba2;">{company_info['Win_Rate_%']:.1f}%</h2>
-                        </div>
-                        """, unsafe_allow_html=True)
-                    
-                    # List all customers
-                    st.markdown("---")
-                    st.subheader("👥 All Customers in this Company")
-                    
-                    customers_list = company_info['ClientIDs']
-                    
-                    # Display in a grid
-                    cols_per_row = 3
-                    for i in range(0, len(customers_list), cols_per_row):
-                        cols = st.columns(cols_per_row)
-                        for j in range(cols_per_row):
-                            if i + j < len(customers_list):
-                                customer_id = customers_list[i + j]
-                                with cols[j]:
-                                    if customer_id in processed_data['ClientID'].values:
-                                        cust_data = processed_data[processed_data['ClientID'] == customer_id].iloc[0]
-                                        segment_class = get_segment_color_class(cust_data['Customer_Segment'])
-                                        
-                                        st.markdown(f"""
-                                        <div class="{segment_class}" style="padding: 1rem; margin: 0.5rem 0;">
-                                            <h5>{customer_id}</h5>
-                                            <p><strong>Segment:</strong> {cust_data['Customer_Segment']}</p>
-                                            <p><strong>CLV:</strong> E£{cust_data['CLV']:,.0f}</p>
-                                            <p><strong>Win Rate:</strong> {cust_data['Win_Rate_%']:.1f}%</p>
-                                            <p><strong>Projects:</strong> {cust_data['Total_Quotations']}</p>
-                                        </div>
-                                        """, unsafe_allow_html=True)
-                
-                # Show country overview when only country selected
-                elif selected_country != '-- Select Country --':
-                    st.markdown("---")
-                    st.header(f"🌍 {selected_country} Overview")
-                    
-                    country_companies = company_data[company_data['Country'] == selected_country]
-                    
-                    # Country-level metrics
-                    total_country_revenue = country_companies['Total_Revenue'].sum()
-                    total_country_quotes = country_companies['Total_Quotes'].sum()
-                    total_country_customers = country_companies['Total_Clients'].sum()
-                    avg_win_rate = country_companies['Win_Rate_%'].mean()
-                    
-                    col1, col2, col3, col4 = st.columns(4)
-                    
-                    with col1:
-                        st.markdown(f"""
-                        <div class="stats-container">
-                            <h4>🏢 Companies</h4>
-                            <h2 style="color: #4facfe;">{len(country_companies)}</h2>
-                        </div>
-                        """, unsafe_allow_html=True)
-                    
-                    with col2:
-                        st.markdown(f"""
-                        <div class="stats-container">
-                            <h4>👥 Total Customers</h4>
-                            <h2 style="color: #43e97b;">{total_country_customers}</h2>
-                        </div>
-                        """, unsafe_allow_html=True)
-                    
-                    with col3:
-                        st.markdown(f"""
-                        <div class="stats-container">
-                            <h4>💰 Total Revenue</h4>
-                            <h2 style="color: #f093fb;">E£{total_country_revenue:,.0f}</h2>
-                        </div>
-                        """, unsafe_allow_html=True)
-                    
-                    with col4:
-                        st.markdown(f"""
-                        <div class="stats-container">
-                            <h4>🎯 Avg Win Rate</h4>
-                            <h2 style="color: #764ba2;">{avg_win_rate:.1f}%</h2>
-                        </div>
-                        """, unsafe_allow_html=True)
-                    
-                    # Show companies in this country
-                    st.markdown("---")
-                    st.subheader(f"🏢 Companies in {selected_country}")
-                    
-                    for idx, company_row in country_companies.iterrows():
-                        with st.expander(f"🏢 {company_row['Company']} - {company_row['Total_Clients']} customers | E£{company_row['Total_Revenue']:,.0f} revenue"):
-                            col1, col2, col3 = st.columns(3)
-                            
-                            with col1:
-                                st.metric("📋 Total Quotes", company_row['Total_Quotes'])
-                                st.metric("✅ Closed Quotes", company_row['Closed_Quotes'])
-                            
-                            with col2:
-                                st.metric("💰 Total Revenue", f"E£{company_row['Total_Revenue']:,.0f}")
-                                st.metric("🎯 Win Rate", f"{company_row['Win_Rate_%']:.1f}%")
-                            
-                            with col3:
-                                st.markdown("**👥 Customers:**")
-                                for customer in company_row['ClientIDs'][:5]:
-                                    st.write(f"• {customer}")
-                                if len(company_row['ClientIDs']) > 5:
-                                    st.write(f"... and {len(company_row['ClientIDs']) - 5} more")
             
             # Display visualizations
             st.header("📊 Interactive Visual Analytics")
             create_visualizations(processed_data)
             
-            # Interactive data exploration
-            st.header("🔍 Advanced Customer Data Explorer")
-            
-            # Enhanced Filters with colorful styling
-            st.markdown("""
-            <div class="stats-container">
-                <h3>🎛️ Filter Controls</h3>
-            </div>
-            """, unsafe_allow_html=True)
-            
-            col1, col2, col3, col4 = st.columns(4)
-            
-            with col1:
-                segment_filter = st.multiselect(
-                    "🎯 Filter by Customer Segment",
-                    options=processed_data['Customer_Segment'].unique(),
-                    default=processed_data['Customer_Segment'].unique()
-                )
-            
-            with col2:
-                min_clv = st.number_input(
-                    "💰 Minimum CLV",
-                    min_value=0,
-                    value=0,
-                    step=1000
-                )
-            
-            with col3:
-                min_win_rate = st.slider(
-                    "📈 Minimum Win Rate (%)",
-                    min_value=0,
-                    max_value=100,
-                    value=0
-                )
-            
-            with col4:
-                min_retention = st.slider(
-                    "🔄 Minimum Retention Rate",
-                    min_value=0.0,
-                    max_value=1.0,
-                    value=0.0,
-                    step=0.1,
-                    format="%.1f"
-                )
-            
-            # Apply filters
-            filtered_data = processed_data[
-                (processed_data['Customer_Segment'].isin(segment_filter)) &
-                (processed_data['CLV'] >= min_clv) &
-                (processed_data['Win_Rate_%'] >= min_win_rate) &
-                (processed_data['Retention_Rate'] >= min_retention)
-            ]
-            
-            # Enhanced filter results display
-            col1, col2 = st.columns(2)
-            with col1:
-                st.markdown(f"""
-                <div class="success-highlight">
-                    📊 Showing {len(filtered_data)} customers
+            # Interactive data exploration (moved into an expander to declutter main flow)
+            with st.expander("🔍 Advanced Customer Data Explorer", expanded=False):
+                # Enhanced Filters with colorful styling
+                st.markdown("""
+                <div class=\"stats-container\">
+                    <h3>🎛️ Filter Controls</h3>
                 </div>
                 """, unsafe_allow_html=True)
-            with col2:
-                st.markdown(f"""
-                <div class="stats-container">
-                    📉 Filtered from {len(processed_data)} total customers
-                </div>
-                """, unsafe_allow_html=True)
-            
-            # Customer search with enhanced styling
-            st.markdown("""
-            <div class="stats-container">
-                <h4>🔍 Customer Search</h4>
-            </div>
-            """, unsafe_allow_html=True)
-            
-            search_term = st.text_input(
-                "Customer Search", 
-                placeholder="Enter customer name or ID to search...",
-                label_visibility="collapsed"
-            )
-            if search_term:
-                filtered_data = filtered_data[
-                    filtered_data['ClientID'].str.contains(search_term, case=False, na=False)
+                
+                col1, col2, col3, col4 = st.columns(4)
+                
+                with col1:
+                    segment_filter = st.multiselect(
+                        "🎯 Filter by Customer Segment",
+                        options=processed_data['Customer_Segment'].unique(),
+                        default=processed_data['Customer_Segment'].unique()
+                    )
+                
+                with col2:
+                    min_clv = st.number_input(
+                        "💰 Minimum CLV",
+                        min_value=0,
+                        value=0,
+                        step=1000
+                    )
+                
+                with col3:
+                    min_win_rate = st.slider(
+                        "📈 Minimum Win Rate (%)",
+                        min_value=0,
+                        max_value=100,
+                        value=0
+                    )
+                
+                with col4:
+                    min_retention = st.slider(
+                        "🔄 Minimum Retention Rate",
+                        min_value=0.0,
+                        max_value=1.0,
+                        value=0.0,
+                        step=0.1,
+                        format="%.1f"
+                    )
+                
+                # Apply filters
+                filtered_data = processed_data[
+                    (processed_data['Customer_Segment'].isin(segment_filter)) &
+                    (processed_data['CLV'] >= min_clv) &
+                    (processed_data['Win_Rate_%'] >= min_win_rate) &
+                    (processed_data['Retention_Rate'] >= min_retention)
                 ]
-                st.markdown(f"""
-                <div class="success-highlight">
-                    🎯 Search results: {len(filtered_data)} customers found
-                </div>
-                """, unsafe_allow_html=True)
-            
-            # Display filtered data with enhanced controls
-            if len(filtered_data) > 0:
-                # Sort options with colorful styling
-                st.markdown("""
-                <div class="stats-container">
-                    <h4>📊 Data Display Controls</h4>
-                </div>
-                """, unsafe_allow_html=True)
                 
+                # Enhanced filter results display
                 col1, col2 = st.columns(2)
                 with col1:
-                    sort_by = st.selectbox(
-                        "🔤 Sort by:",
-                        options=['CLV', 'Win_Rate_%', 'Retention_Rate', 'Churn_Rate', 'Total_Quotations', 'Years_Active', 'Projects_Per_Year'],
-                        index=0
-                    )
-                
+                    st.markdown(f"""
+                    <div class=\"success-highlight\">
+                        📊 Showing {len(filtered_data)} customers
+                    </div>
+                    """, unsafe_allow_html=True)
                 with col2:
-                    sort_order = st.radio("📈 Sort order:", ['Descending', 'Ascending'])
-                    ascending = sort_order == 'Ascending'
-                
-                # Sort and display with color-coded segments
-                display_data = filtered_data.sort_values(by=sort_by, ascending=ascending)
-                
-                # Color-code the dataframe based on customer segments
-                def highlight_segments(val, column_name):
-                    if column_name == 'Customer_Segment':
-                        if val == 'High':
-                            return 'background-color: #4facfe; color: white; font-weight: bold'
-                        elif val == 'Medium':
-                            return 'background-color: #43e97b; color: white; font-weight: bold'
-                        else:
-                            return 'background-color: #fa709a; color: white; font-weight: bold'
-                    elif column_name == 'Retention_Rate':
-                        if val >= 0.7:
-                            return 'background-color: #00ff88; color: white; font-weight: bold'
-                        elif val >= 0.4:
-                            return 'background-color: #ffaa00; color: white; font-weight: bold'
-                        else:
-                            return 'background-color: #ff4757; color: white; font-weight: bold'
-                    elif column_name == 'CLV' and val >= 75000:
-                        return 'background-color: #667eea; color: white; font-weight: bold'
-                    elif column_name == 'Win_Rate_%' and val >= 70:
-                        return 'background-color: #764ba2; color: white; font-weight: bold'
-                    return ''
-                
-                # Apply styling to dataframe
-                styled_df = display_data.style.map(
-                    lambda x: highlight_segments(x, 'Customer_Segment'), 
-                    subset=['Customer_Segment']
-                ).map(
-                    lambda x: highlight_segments(x, 'Retention_Rate'), 
-                    subset=['Retention_Rate']
-                ).map(
-                    lambda x: highlight_segments(x, 'CLV'), 
-                    subset=['CLV']
-                ).map(
-                    lambda x: highlight_segments(x, 'Win_Rate_%'), 
-                    subset=['Win_Rate_%']
-                ).format({
-                    'CLV': 'E£{:,.2f}',
-                    'Total_Project_Value': 'E£{:,.2f}',
-                    'Revenue_by_Service': 'E£{:,.2f}',
-                    'Win_Rate_%': '{:.1f}%',
-                    'Loss_Rate_%': '{:.1f}%',
-                    'Retention_Rate': '{:.2f}',
-                    'Churn_Rate': '{:.2f}',
-                    'Years_Active': '{:.1f}',
-                    'Projects_Per_Year': '{:.1f}'
-                })
-                
-                st.dataframe(
-                    styled_df,
-                    use_container_width=True,
-                    height=400
-                )
-                
-                # Download processed data with enhanced buttons
-                st.header("📥 Export Your Analytics")
-                
-                csv_buffer = io.StringIO()
-                display_data.to_csv(csv_buffer, index=False)
-                csv_data = csv_buffer.getvalue()
-                
-                col1, col2 = st.columns(2)
-                with col1:
-                    st.markdown("""
-                    <div class="stats-container">
-                        <h4>📊 Filtered Data Export</h4>
+                    st.markdown(f"""
+                    <div class=\"stats-container\">
+                        📉 Filtered from {len(processed_data)} total customers
                     </div>
                     """, unsafe_allow_html=True)
-                    st.download_button(
-                        label="📊 Download Filtered Data (CSV)",
-                        data=csv_data,
-                        file_name=f"customer_analytics_filtered_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                        mime="text/csv"
-                    )
                 
-                with col2:
-                    st.markdown("""
-                    <div class="stats-container">
-                        <h4>📋 Complete Analytics Export</h4>
-                    </div>
-                    """, unsafe_allow_html=True)
-                    # Download full processed data
-                    full_csv_buffer = io.StringIO()
-                    processed_data.to_csv(full_csv_buffer, index=False)
-                    full_csv_data = full_csv_buffer.getvalue()
-                    
-                    st.download_button(
-                        label="📋 Download All Analytics (CSV)",
-                        data=full_csv_data,
-                        file_name=f"complete_customer_analytics_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                        mime="text/csv"
-                    )
-                
-                # Enhanced Individual customer details
-                st.header("👤 Individual Customer Deep Dive")
-                
-                selected_customer = st.selectbox(
-                    "🎯 Select a customer for detailed analysis:",
-                    options=sorted(processed_data['ClientID'].unique().tolist()),
-                    help="Choose a customer to see detailed analytics with colorful highlights"
-                )
-                
-                if selected_customer:
-                    customer_data = processed_data[processed_data['ClientID'] == selected_customer].iloc[0]
-                    display_individual_customer(customer_data, selected_customer)
-                    
-                    # Additional analytics charts for individual customer
-                    st.markdown("""
-                    <div class="stats-container">
-                        <h3>📊 Customer Performance Metrics</h3>
-                    </div>
-                    """, unsafe_allow_html=True)
-                    
-                    # Create individual customer metrics visualization
-                    metrics_data = {
-                        'Metric': ['Win Rate', 'Retention Rate', 'Project Diversity', 'Years Active'],
-                        'Value': [
-                            customer_data['Win_Rate_%'],
-                            customer_data['Retention_Rate'] * 100,
-                            customer_data['Project_Diversity'] * 10,  # Scale for visualization
-                            customer_data['Years_Active'] * 10  # Scale for visualization
-                        ],
-                        'Color': ['#4facfe', '#43e97b', '#fa709a', '#667eea']
-                    }
-                    
-                    fig_customer = px.bar(
-                        x=metrics_data['Metric'],
-                        y=metrics_data['Value'],
-                        color=metrics_data['Metric'],
-                        title=f"🎯 {selected_customer} - Key Performance Metrics",
-                        color_discrete_sequence=['#4facfe', '#43e97b', '#fa709a', '#667eea']
-                    )
-                    fig_customer.update_layout(
-                        showlegend=False,
-                        paper_bgcolor='rgba(0,0,0,0)',
-                        plot_bgcolor='rgba(0,0,0,0)',
-                        title_font_size=16,
-                        title_x=0.5
-                    )
-                    st.plotly_chart(fig_customer, use_container_width=True)
-            
-            else:
+                # Customer search with enhanced styling
                 st.markdown("""
-                <div class="warning-highlight">
-                    ⚠️ No customers match the current filters. Try adjusting your criteria.
-                </div>
+                <div class=\"stats-container\">\n                    <h4>🔍 Customer Search</h4>\n                </div>
                 """, unsafe_allow_html=True)
+                
+                search_term = st.text_input(
+                    "Customer Search", 
+                    placeholder="Enter customer name or ID to search...",
+                    label_visibility="collapsed"
+                )
+                if search_term:
+                    filtered_data = filtered_data[
+                        filtered_data['ClientID'].str.contains(search_term, case=False, na=False)
+                    ]
+                    st.markdown(f"""
+                    <div class=\"success-highlight\">
+                        🎯 Search results: {len(filtered_data)} customers found
+                    </div>
+                    """, unsafe_allow_html=True)
+                
+                # Display filtered data with enhanced controls
+                if len(filtered_data) > 0:
+                    # Sort options with colorful styling
+                    st.markdown("""
+                    <div class=\"stats-container\">\n                        <h4>📊 Data Display Controls</h4>\n                    </div>
+                    """, unsafe_allow_html=True)
+                    
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        sort_by = st.selectbox(
+                            "🔤 Sort by:",
+                            options=['CLV', 'Win_Rate_%', 'Retention_Rate', 'Churn_Rate', 'Total_Quotations', 'Years_Active', 'Projects_Per_Year'],
+                            index=0
+                        )
+                    
+                    with col2:
+                        sort_order = st.radio("📈 Sort order:", ['Descending', 'Ascending'])
+                        ascending = sort_order == 'Ascending'
+                    
+                    # Sort and display with color-coded segments
+                    display_data = filtered_data.sort_values(by=sort_by, ascending=ascending)
+                    
+                    # Color-code the dataframe based on customer segments
+                    def highlight_segments(val, column_name):
+                        if column_name == 'Customer_Segment':
+                            if val == 'High':
+                                return 'background-color: #4facfe; color: white; font-weight: bold'
+                            elif val == 'Medium':
+                                return 'background-color: #43e97b; color: white; font-weight: bold'
+                            else:
+                                return 'background-color: #fa709a; color: white; font-weight: bold'
+                        elif column_name == 'Retention_Rate':
+                            if val >= 0.7:
+                                return 'background-color: #00ff88; color: white; font-weight: bold'
+                            elif val >= 0.4:
+                                return 'background-color: #ffaa00; color: white; font-weight: bold'
+                            else:
+                                return 'background-color: #ff4757; color: white; font-weight: bold'
+                        elif column_name == 'CLV' and val >= 75000:
+                            return 'background-color: #667eea; color: white; font-weight: bold'
+                        elif column_name == 'Win_Rate_%' and val >= 70:
+                            return 'background-color: #764ba2; color: white; font-weight: bold'
+                        return ''
+                    
+                    # Apply styling to dataframe
+                    styled_df = display_data.style.map(
+                        lambda x: highlight_segments(x, 'Customer_Segment'), 
+                        subset=['Customer_Segment']
+                    ).map(
+                        lambda x: highlight_segments(x, 'Retention_Rate'), 
+                        subset=['Retention_Rate']
+                    ).map(
+                        lambda x: highlight_segments(x, 'CLV'), 
+                        subset=['CLV']
+                    ).map(
+                        lambda x: highlight_segments(x, 'Win_Rate_%'), 
+                        subset=['Win_Rate_%']
+                    ).format({
+                        'CLV': 'E£{:,.2f}',
+                        'Total_Project_Value': 'E£{:,.2f}',
+                        'Revenue_by_Service': 'E£{:,.2f}',
+                        'Win_Rate_%': '{:.1f}%','Loss_Rate_%': '{:.1f}%',
+                        'Retention_Rate': '{:.2f}',
+                        'Churn_Rate': '{:.2f}',
+                        'Years_Active': '{:.1f}',
+                        'Projects_Per_Year': '{:.1f}'
+                    })
+                    
+                    st.dataframe(
+                        styled_df,
+                        use_container_width=True,
+                        height=400
+                    )
+                    
+                    # Download processed data with enhanced buttons
+                    st.header("📥 Export Your Analytics")
+                    
+                    csv_buffer = io.StringIO()
+                    display_data.to_csv(csv_buffer, index=False)
+                    csv_data = csv_buffer.getvalue()
+                    
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.markdown("""
+                        <div class=\"stats-container\">\n                            <h4>📊 Filtered Data Export</h4>\n                        </div>
+                        """, unsafe_allow_html=True)
+                        st.download_button(
+                            label="📊 Download Filtered Data (CSV)",
+                            data=csv_data,
+                            file_name=f"customer_analytics_filtered_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                            mime="text/csv"
+                        )
+                    
+                    with col2:
+                        st.markdown("""
+                        <div class=\"stats-container\">\n                            <h4>📋 Complete Analytics Export</h4>\n                        </div>
+                        """, unsafe_allow_html=True)
+                        # Download full processed data
+                        full_csv_buffer = io.StringIO()
+                        processed_data.to_csv(full_csv_buffer, index=False)
+                        full_csv_data = full_csv_buffer.getvalue()
+                        
+                        st.download_button(
+                            label="📋 Download All Analytics (CSV)",
+                            data=full_csv_data,
+                            file_name=f"complete_customer_analytics_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                            mime="text/csv"
+                        )
+                else:
+                    st.markdown("""
+                    <div class=\"warning-highlight\">\n                        ⚠️ No customers match the current filters. Try adjusting your criteria.\n                    </div>
+                    """, unsafe_allow_html=True)
                 
         except Exception as e:
             st.markdown(f"""
