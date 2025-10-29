@@ -13,7 +13,7 @@ build/
 
 # Sensitive data - DO NOT COMMIT
 client_data.csv
-
+venv
 # OS
 .DS_Store
 Thumbs.db
